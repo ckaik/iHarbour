@@ -1,0 +1,218 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2b872a44..35664a68 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,7 +55,7 @@ else()
+ set(CPP "${CMAKE_C_COMPILER}" "-E" "-P" "-Wno-trigraphs" "-x" "c")
+ endif()
+ 
+-if(IOS)
++if(IOS AND NOT HARBOUR_ROOT)
+ set(PLATFORM "OS64")
+ include(cmake/ios.toolchain.cmake)
+ add_compile_definitions(
+@@ -65,6 +65,17 @@ set(CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "YOUR_TEAM_ID")
+ set(PROJECT_ID "dev.net64.game")
+ endif()
+ 
++################################################################################
++# iHarbour (iOS): dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the launcher app. The game's
++# own iOS setup above is for the Xcode generator; its toolchain overrides the
++# sysroot, architectures and flags of CMake's native iOS support.
++################################################################################
++if(HARBOUR_ROOT)
++    add_compile_definitions(PLATFORM_IOS=1)
++    include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ ################################################################################
+ # Set target arch type if empty. Visual studio solution generator provides it.
+ ################################################################################
+@@ -118,7 +129,12 @@ if (UNIX AND NOT APPLE)
+ find_package(OpenGL REQUIRED)
+ endif()
+ 
++if(HARBOUR_ROOT)
++    # The simulator and device builds each get their own.
++    configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/properties.h.in ${CMAKE_CURRENT_BINARY_DIR}/properties.h @ONLY)
++else()
+ configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/properties.h.in ${CMAKE_CURRENT_SOURCE_DIR}/properties.h @ONLY)
++endif()
+ 
+ # Include directories
+ include_directories(
+@@ -165,7 +181,12 @@ list(FILTER ALL_FILES EXCLUDE REGEX "src/sys/sys_timer.c")
+ list(FILTER ALL_FILES EXCLUDE REGEX "src/sys/sys_fault.c")
+ list(FILTER ALL_FILES EXCLUDE REGEX "src/mods/object_ram.c")
+ 
+-if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++if (HARBOUR_ROOT)
++    # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++    # that the iHarbour launcher app loads and runs in its own process.
++    add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
++    harbour_add_game_framework(${PROJECT_NAME})
++elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/ios)
+ 
+     set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
+@@ -270,7 +291,16 @@ include_directories(
+   ${dr_libs_SOURCE_DIR}
+ )
+ 
++if(HARBOUR_ROOT)
++    # Build output in the build directory, so the simulator and device builds don't share files.
++    add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship)
++    # The include directories above reach libultraship's dependencies as well, and libultraship/src/config/Config.h
++    # shadows the config.h of libzip, which desktop builds take from the system.
++    FetchContent_GetProperties(libzip BINARY_DIR HARBOUR_LIBZIP_BINARY_DIR)
++    target_include_directories(zip BEFORE PRIVATE ${HARBOUR_LIBZIP_BINARY_DIR})
++else()
+ add_subdirectory(libultraship ${CMAKE_CURRENT_SOURCE_DIR}/libultraship)
++endif()
+ add_dependencies(${PROJECT_NAME} libultraship)
+ target_link_libraries(${PROJECT_NAME} PRIVATE libultraship)
+ 
+@@ -322,6 +352,11 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU|Clang|AppleClang")
+ 	)
+ endif()
+ 
++if (HARBOUR_ROOT)
++    # libultraship defines __IOS__ only for itself, and its headers have __IOS__ members.
++    target_compile_definitions(${PROJECT_NAME} PRIVATE __IOS__)
++endif()
++
+ 
+ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     find_package(Ogg CONFIG REQUIRED)
+@@ -355,6 +390,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+     target_include_directories(${PROJECT_NAME} PRIVATE
+         ${DEVKITPRO}/portlibs/wiiu/include/
+     )
++elseif(HARBOUR_ROOT)
++    # iHarbour's HarbourIOS.cmake builds Ogg and Vorbis; harbour_add_game_framework links them and SDL.
++    set(ADDITIONAL_LIBRARY_DEPENDENCIES
++        "Ogg::ogg"
++        "Vorbis::vorbis"
++        "Vorbis::vorbisenc"
++        "Vorbis::vorbisfile"
++    )
+ else()
+     find_package(Ogg REQUIRED)
+     find_package(Vorbis REQUIRED)
+@@ -599,14 +642,19 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+   endif()
+ endif()
+ 
++# On iOS scripts/build-engine.sh in iHarbour puts config.yml and the yamls into the framework.
++if(NOT HARBOUR_ROOT)
+ add_custom_command(
+ 	TARGET ${PROJECT_NAME} POST_BUILD
+ 	COMMENT "Copying asset yamls..."
+ 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/config.yml" "$<TARGET_FILE_DIR:Starship>/config.yml"
+ 	COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/assets/" "$<TARGET_FILE_DIR:Starship>/assets/"
+ )
++endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++# Host-only steps (a host Torch, asset extraction, packing starship.o2r, downloads, macOS bundling) are left out of
++# iHarbour's iOS build. Its build-engine.sh packs starship.o2r itself.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT HARBOUR_ROOT)
+ include(ExternalProject)
+ ExternalProject_Add(TorchExternal
+ 	PREFIX TorchExternal
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index bc0ccb1f..19dd9573 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -134,6 +134,29 @@ GameEngine::GameEngine() {
+         std::unordered_map<CONTROLLERBUTTONS_T, std::unordered_set<Ship::KbScancode>>(),
+         // KeyboardKeyToAxisDirectionMappings - use built-in LUS defaults
+         std::unordered_map<Ship::StickIndex, std::vector<std::pair<Ship::Direction, Ship::KbScancode>>>(),
++#ifdef HARBOUR_IOS
++        // iHarbour: libultraship's default gamepad layout, which iHarbour's on-screen controller sends (A, B, L
++        // and Start on buttons, Z and R on the triggers, the C buttons on the right stick), so its buttons do what
++        // their labels say. Game controllers also get boost (C-left) and brake (C-down) on Y and X, and R on RB as
++        // in Starship's own layout.
++        std::unordered_map<CONTROLLERBUTTONS_T, std::unordered_set<SDL_GameControllerButton>>{
++            { BTN_A, { SDL_CONTROLLER_BUTTON_A } },
++            { BTN_B, { SDL_CONTROLLER_BUTTON_B } },
++            { BTN_L, { SDL_CONTROLLER_BUTTON_LEFTSHOULDER } },
++            { BTN_R, { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER } },
++            { BTN_START, { SDL_CONTROLLER_BUTTON_START } },
++            { BTN_CLEFT, { SDL_CONTROLLER_BUTTON_Y } },
++            { BTN_CDOWN, { SDL_CONTROLLER_BUTTON_X } },
++            { BTN_DUP, { SDL_CONTROLLER_BUTTON_DPAD_UP } },
++            { BTN_DDOWN, { SDL_CONTROLLER_BUTTON_DPAD_DOWN } },
++            { BTN_DLEFT, { SDL_CONTROLLER_BUTTON_DPAD_LEFT } },
++            { BTN_DRIGHT, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT } }
++        },
++        // SDLButtonToAxisDirectionMappings - use built-in LUS defaults
++        std::unordered_map<Ship::StickIndex, std::vector<std::pair<Ship::Direction, SDL_GameControllerButton>>>(),
++        // SDLAxisDirectionToButtonMappings - use built-in LUS defaults (Z and R on the triggers, C on the right stick)
++        std::unordered_map<CONTROLLERBUTTONS_T, std::vector<std::pair<SDL_GameControllerAxis, int32_t>>>(),
++#else
+         // SDLButtonToButtonMappings
+         std::unordered_map<CONTROLLERBUTTONS_T, std::unordered_set<SDL_GameControllerButton>>{
+             { BTN_A, { SDL_CONTROLLER_BUTTON_A } },
+@@ -157,6 +180,7 @@ GameEngine::GameEngine() {
+             { BTN_CUP, { { SDL_CONTROLLER_AXIS_RIGHTY, -1 } } },
+             { BTN_CRIGHT, { { SDL_CONTROLLER_AXIS_RIGHTX, 1 } } }
+         },
++#endif
+         // SDLAxisDirectionToAxisDirectionMappings - use built-in LUS defaults
+         std::unordered_map<Ship::StickIndex, std::vector<std::pair<Ship::Direction, std::pair<SDL_GameControllerAxis, int32_t>>>>()
+     );
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index ef7894be..e09c17dc 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -2,6 +2,9 @@
+ 
+ #include <Fast3D/interpreter.h>
+ #include "Engine.h"
++#ifdef HARBOUR_IOS
++#include <filesystem>
++#endif
+ 
+ extern "C" {
+ #include <sf64mesg.h>
+@@ -31,6 +34,16 @@ void push_frame() {
+ 
+ #ifdef _WIN32
+ int SDL_main(int argc, char **argv) {
++#elif defined(HARBOUR_IOS)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++extern "C" int HarbourGame_Main(int argc, char* argv[]) {
++    // The launcher extracts ROMs itself and only starts the game once sf64.o2r exists. Without it the game would
++    // offer to extract a ROM it can't pick on iOS, and then exit the whole app.
++    if (!std::filesystem::exists(Ship::Context::GetPathRelativeToAppDirectory("sf64.o2r"))) {
++        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Starship", "sf64.o2r is missing. Add a ROM in iHarbour first.",
++                                 nullptr);
++        return 1;
++    }
+ #else
+ #if defined(__cplusplus) && defined(PLATFORM_IOS)
+ extern "C"
+diff --git a/src/port/ui/ImguiUI.cpp b/src/port/ui/ImguiUI.cpp
+index 5874ac2a..221716bc 100644
+--- a/src/port/ui/ImguiUI.cpp
++++ b/src/port/ui/ImguiUI.cpp
+@@ -333,12 +333,17 @@ void DrawSettingsMenu(){
+                             };
+                     }
+                 } else {
++#ifdef HARBOUR_IOS
++                    // iHarbour extracts ROMs in its launcher; the game has no file picker on iOS.
++                    ImGui::Text("Add a JP or EU ROM in iHarbour's launcher\nto install their voices.");
++#else
+                     if (UIWidgets::Button("Install JP/EU Audio")) {
+                         if (GameEngine::GenAssetFile(false)){
+                             GameEngine::ShowMessage("Success", "Audio assets installed. Changes will be applied on the next startup.", SDL_MESSAGEBOX_INFORMATION);
+                         }
+                         Ship::Context::GetInstance()->GetWindow()->Close();
+                     }
++#endif
+                 }
+                 ImGui::EndMenu();
+             }

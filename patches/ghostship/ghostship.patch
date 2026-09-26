@@ -1,0 +1,153 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0903e2a7..77fb286a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,5 +1,14 @@
+ cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
+ 
++# iHarbour (iOS): the CVar names in cmake/lus-cvars.cmake are plain variables that
++# libultraship's cvars.cmake then declares as cache entries. Under the OLD
++# behaviour of CMP0126 the first configure replaces them with libultraship's
++# defaults and later ones keep them, so the names would depend on how often the
++# build was configured. NEW keeps them on every configure.
++if(HARBOUR_ROOT)
++    cmake_policy(SET CMP0126 NEW)
++endif()
++
+ # Set the project version and language
+ project(Ghostship VERSION 3.0.0 LANGUAGES C CXX ASM)
+ include(FetchContent)
+@@ -101,7 +110,12 @@ if(IOS)
+         set(PLATFORM "OS64")
+     endif()
+     option(IOS_SIGNING "Code sign the iOS app (OFF produces an unsigned bundle for sideloading)" ON)
+-    include(cmake/ios.toolchain.cmake)
++    # iHarbour builds with CMake's own iOS support and Ninja. This toolchain is
++    # written for the Xcode generator and overrides the sysroot, architectures,
++    # deployment target and flags that iHarbour's build sets.
++    if(NOT HARBOUR_ROOT)
++        include(cmake/ios.toolchain.cmake)
++    endif()
+     add_compile_definitions(
+         PLATFORM_IOS=1
+         __IOS__
+@@ -114,6 +128,14 @@ if(IOS)
+     set(PROJECT_ID "${BUNDLE_ID}")
+ endif()
+ 
++################################################################################
++# iHarbour (iOS): dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the launcher app
++################################################################################
++if(HARBOUR_ROOT)
++    include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ if(EMSCRIPTEN)
+     add_compile_definitions(USE_OPENGLES=1)
+     add_compile_options(-pthread -sUSE_SDL=2 -fexceptions)
+@@ -303,7 +325,12 @@ foreach(source IN LISTS ALL_FILES)
+     source_group("${source_path_adjusted}" FILES "${source}")
+ endforeach()
+ 
+-if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++if (HARBOUR_ROOT)
++    # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++    # that the iHarbour launcher app loads and runs in its own process.
++    add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
++    harbour_add_game_framework(${PROJECT_NAME})
++elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ios)
+ 
+     set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
+@@ -561,7 +588,10 @@ if(ANDROID)
+     target_link_libraries(${PROJECT_NAME} PRIVATE libzip::zip GLESv3 EGL android log)
+ endif()
+ 
++# The iHarbour framework exports HarbourEngine_GetAPI and nothing else.
++if(NOT HARBOUR_ROOT)
+ set_target_properties(${PROJECT_NAME} PROPERTIES ENABLE_EXPORTS TRUE)
++endif()
+ set_target_properties(${PROJECT_NAME} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+ 
+ #=================== cimgui ===================
+@@ -920,7 +950,8 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+   endif()
+ endif()
+ 
+-if(NOT ANDROID)
++# On iOS scripts/build-engine.sh in iHarbour puts config.yml and assets/ into the framework.
++if(NOT ANDROID AND NOT HARBOUR_ROOT)
+ add_custom_command(
+ 	TARGET ${PROJECT_NAME} POST_BUILD
+ 	COMMENT "Copying asset yamls..."
+@@ -966,7 +997,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+   endif()
+ endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT ANDROID)
++# iHarbour leaves the host tools, the extraction targets and the downloads out of
++# the iOS build: ports/ghostship/port.sh packs ghostship.o2r, and the launcher
++# extracts the ROM in the app.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT ANDROID AND NOT HARBOUR_ROOT)
+ include(ExternalProject)
+ ExternalProject_Add(TorchExternal
+ 	PREFIX TorchExternal
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index 6304d01e..8c4e8d36 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -1387,6 +1387,11 @@ ImFont* GameEngine::CreateFontWithSize(float size, std::string fontPath) {
+     const float backingScale = ShipCompat::GetWindow()->GetGui()->GetDpiScale();
+     if (backingScale > 1.0f) {
+         rasterDensity = backingScale * kMaxMenuScale;
++#ifdef HARBOUR_IOS
++        // iHarbour: iPhones are 3x, and these fonts' atlas at 6x would take a few hundred MB. Bake them for the
++        // normal menu size; the larger ones are a little soft.
++        rasterDensity = backingScale;
++#endif
+     }
+     if (fontPath == "") {
+         ImFontConfig fontCfg = ImFontConfig();
+@@ -1430,6 +1435,11 @@ void GameEngine::ScaleImGui() {
+     }
+ 
+     float scale = imguiScaleOptionToValue[imGuiScaleIndex];
++#ifdef HARBOUR_IOS
++    // iHarbour: ImGui works in pixels on iOS, so the menus would be a third of their size on a 3x screen. Size
++    // them in points, like the desktop builds and iHarbour's other games.
++    scale *= ShipCompat::GetWindow()->GetGui()->GetDpiScale();
++#endif
+     float newScale = scale / previousImGuiScale;
+     ImGui::GetStyle().ScaleAllSizes(newScale);
+     ImGui::GetIO().FontGlobalScale = scale;
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index aec1a3e8..f21a44b0 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -60,6 +60,9 @@ static void GhostshipCrashTrace(int sig) {
+ 
+ #ifdef _WIN32
+ int SDL_main(int argc, char** argv) {
++#elif defined(HARBOUR_IOS)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++extern "C" int HarbourGame_Main(int argc, char* argv[]) {
+ #else
+ int main(int argc, char* argv[]) {
+ #endif
+diff --git a/src/port/ui/TouchControls.cpp b/src/port/ui/TouchControls.cpp
+index 562a5b4f..9525c58e 100644
+--- a/src/port/ui/TouchControls.cpp
++++ b/src/port/ui/TouchControls.cpp
+@@ -14,7 +14,10 @@
+ #include <cstdio>
+ #include <vector>
+ 
+-#if defined(PLATFORM_IOS) || defined(__IOS__) || defined(__ANDROID__)
++#if defined(HARBOUR_IOS)
++// iHarbour draws its own touch controller above the game, so this one starts off.
++#define TOUCH_CONTROLS_DEFAULT 0
++#elif defined(PLATFORM_IOS) || defined(__IOS__) || defined(__ANDROID__)
+ #define TOUCH_CONTROLS_DEFAULT 1
+ #else
+ #define TOUCH_CONTROLS_DEFAULT 0

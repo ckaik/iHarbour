@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-commit — lints the STAGED Swift files in app/ for fast commits, with the
+# same tools and settings as `make lint` (swift-format and SwiftLint, --strict).
+# Repo-wide debt is caught at push time by .githooks/pre-push (full `make lint`).
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+swift_files=()
+while IFS= read -r -d '' file; do
+  swift_files+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- 'app/*.swift')
+
+echo "Linting ${#swift_files[@]} staged Swift file(s)…"
+if [ ${#swift_files[@]} -eq 0 ]; then
+  exit 0
+fi
+
+make --no-print-directory check-mint
+xcrun swift-format lint --strict "${swift_files[@]}"
+mint run --silent swiftlint lint --config .swiftlint.yml --strict --quiet "${swift_files[@]}"

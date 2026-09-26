@@ -1,0 +1,101 @@
+# SwiftLint configuration — allowlist-only.
+#
+# `only_rules` runs ONLY the rules listed below and nothing else (no defaults,
+# no opt-in rules). swift-format owns all layout/formatting, so this list is
+# restricted to non-cosmetic (semantic / correctness / idiom / performance)
+# rules that don't conflict with or duplicate a swift-format rule.
+#
+# Rules whose target pattern can't structurally occur in this codebase
+# (Objective-C interop, KVO, NotificationCenter, delegate protocols, legacy
+# CoreGraphics/AppKit C functions, etc.) are intentionally omitted.
+#
+# Metrics rules use SwiftLint's default thresholds for now; tune via per-rule
+# config blocks if they prove too strict.
+only_rules:
+  # Idiomatic
+  - convenience_type
+  - discouraged_none_name
+  - explicit_init
+  - fatal_error_message
+  - file_name_no_space
+  - force_cast
+  - is_disjoint
+  - legacy_multiple
+  - legacy_objc_type
+  - legacy_random
+  - prefer_key_path
+  - prefer_type_checking
+  - private_over_fileprivate
+  - redundant_nil_coalescing
+  - redundant_set_access_control
+  - redundant_string_enum_value
+  - return_value_from_void_function
+  - shorthand_optional_binding
+  - static_over_final_class
+  - toggle_bool
+  - unavailable_condition
+  - unneeded_break_in_switch
+  - unused_enumerated
+  - void_function_in_ternary
+  # Lint
+  - accessibility_label_for_image
+  - accessibility_trait_for_button
+  - array_init
+  - async_without_await
+  - blanket_disable_command
+  - deployment_target
+  - duplicate_conditions
+  - duplicate_enum_cases
+  - duplicated_key_in_dictionary_literal
+  - identical_operands
+  - invalid_swiftlint_command
+  - local_doc_comment
+  - ns_number_init_as_function_reference
+  - non_optional_string_data_conversion
+  - optional_data_string_conversion
+  - orphaned_doc_comment
+  - overridden_super_call
+  - private_swiftui_state
+  - prohibited_super_call
+  - redundant_sendable
+  - self_in_property_initialization
+  - unhandled_throwing_task
+  - unneeded_override
+  - unneeded_throws_rethrows
+  - unused_closure_parameter
+  - unused_control_flow_label
+  - unused_setter_value
+  - yoda_condition
+  # Performance
+  - contains_over_filter_count
+  - contains_over_filter_is_empty
+  - contains_over_first_not_nil
+  - contains_over_range_nil_comparison
+  - empty_collection_literal
+  - empty_count
+  - empty_string
+  - first_where
+  - flatmap_over_map_reduce
+  - last_where
+  - reduce_boolean
+  - reduce_into
+  - sorted_first_last
+  # Metrics
+  - file_length
+  - large_tuple
+  - nesting
+  # Style (semantic only)
+  - direct_return
+  - empty_enum_arguments
+  - implicit_optional_initialization
+  - prefer_self_in_static_references
+  - prefer_self_type_over_type_of_self
+  - redundant_discardable_let
+  - redundant_self
+  - unused_optional_binding
+
+# Rule configuration ----------------------------------------------------------
+
+file_length:
+  warning: 400
+  error: 800

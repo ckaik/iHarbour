@@ -1,0 +1,216 @@
+diff --git a/include/fast/backends/gfx_sdl.h b/include/fast/backends/gfx_sdl.h
+index 79042f4e..541e7e3e 100644
+--- a/include/fast/backends/gfx_sdl.h
++++ b/include/fast/backends/gfx_sdl.h
+@@ -65,6 +65,12 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
+     // OTRTODO: These are redundant. Info can be queried from SDL.
+     int mWindowWidth = 640;
+     int mWindowHeight = 480;
++#ifdef __IOS__
++    // iOS can't present from the background: CAMetalLayer's nextDrawable blocks and then returns nil, and the
++    // system kills apps that submit GPU work there. Frames are skipped between resigning active and becoming
++    // active again.
++    bool mInBackground = false;
++#endif
+     void (*mOnAllKeysUp)();
+ };
+ } // namespace Fast
+diff --git a/include/ship/audio/AudioPlayer.h b/include/ship/audio/AudioPlayer.h
+index 2725ec3c..f054f8df 100644
+--- a/include/ship/audio/AudioPlayer.h
++++ b/include/ship/audio/AudioPlayer.h
+@@ -158,7 +158,7 @@ class AudioPlayer {
+ #include "WasapiAudioPlayer.h"
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+ #include "CoreAudioAudioPlayer.h"
+ #endif
+ 
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index 15c5415f..92547bc2 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -219,6 +219,17 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
+         return;
+     }
+ 
++#ifdef __IOS__
++    // The window always fills its scene on iOS. SDL's fullscreen mode would resize it to the display mode instead,
++    // which SDL doesn't keep in step with the scene's orientation, leaving the game drawing a portrait frame into a
++    // landscape view.
++    mFullScreen = on;
++    if (call_callback && mOnFullscreenChanged != nullptr) {
++        mOnFullscreenChanged(on);
++    }
++    return;
++#endif
++
+     int display_in_use = SDL_GetWindowDisplayIndex(mWnd);
+     if (display_in_use < 0) {
+         SPDLOG_WARN("Can't detect on which monitor we are. Probably out of display area?");
+@@ -235,7 +246,7 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
+         }
+     }
+ 
+-#if defined(__APPLE__)
++#if defined(__APPLE__) && !defined(__IOS__)
+     // Implement fullscreening with native macOS APIs
+     if (on != isNativeMacOSFullscreenActive(mWnd)) {
+         toggleNativeMacOSFullscreen(mWnd);
+@@ -374,7 +385,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+     int len = snprintf(title, sizeof(title), "%s (%s)", gameName, gfxApiName);
+ 
+ #ifdef __IOS__
+-    Uint32 flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN;
++    Uint32 flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI;
+ #else
+     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+ #endif
+@@ -657,6 +668,14 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
+         case SDL_DROPFILE:
+             Ship::Context::GetRawInstance()->GetFileDropMgr()->SetDroppedFile(event.drop.file);
+             break;
++#ifdef __IOS__
++        case SDL_APP_WILLENTERBACKGROUND:
++            mInBackground = true;
++            break;
++        case SDL_APP_DIDENTERFOREGROUND:
++            mInBackground = false;
++            break;
++#endif
+         case SDL_QUIT:
+             Close();
+             break;
+@@ -664,17 +683,29 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
+ }
+ 
+ void GfxWindowBackendSDL2::HandleEvents() {
+-    SDL_Event event;
+-    SDL_PumpEvents();
+-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
+-        HandleSingleEvent(event);
+-    }
+-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
+-        HandleSingleEvent(event);
++    auto handlePendingEvents = [this]() {
++        SDL_Event event;
++        SDL_PumpEvents();
++        while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
++            HandleSingleEvent(event);
++        }
++        while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
++            HandleSingleEvent(event);
++        }
++    };
++    handlePendingEvents();
++
++#ifdef __IOS__
++    // No frames are drawn while the app is inactive, and the frame pacing lives in the drawing path, so the game
++    // would run flat out behind Control Center or an incoming call. Pause it until the app is active again.
++    while (mInBackground && mIsRunning) {
++        SDL_Delay(16);
++        handlePendingEvents();
+     }
++#endif
+ 
+     // resync fullscreen state
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+     auto nextFullscreenState = isNativeMacOSFullscreenActive(mWnd);
+     if (mFullScreen != nextFullscreenState) {
+         mFullScreen = nextFullscreenState;
+@@ -686,7 +717,11 @@ void GfxWindowBackendSDL2::HandleEvents() {
+ }
+ 
+ bool GfxWindowBackendSDL2::IsFrameReady() {
++#ifdef __IOS__
++    return !mInBackground;
++#else
+     return true;
++#endif
+ }
+ 
+ static uint64_t qpc_to_100ns(uint64_t qpc) {
+diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
+index 361a1f75..aee45810 100644
+--- a/src/ship/Context.cpp
++++ b/src/ship/Context.cpp
+@@ -27,6 +27,9 @@
+ #include "ship/utils/AppleFolderManager.h"
+ #include <unistd.h>
+ #include <pwd.h>
++#ifdef __IOS__
++#include <dlfcn.h>
++#endif
+ #endif
+ 
+ namespace Ship {
+@@ -482,8 +485,13 @@ std::string Context::GetAppBundlePath() {
+ #endif
+ 
+ #ifdef __IOS__
+-    const char* home = getenv("HOME");
+-    return std::string(home) + "/Documents";
++    // iHarbour: the game is a framework that the launcher app loads, and its read-only data (the port's own
++    // archive, extraction specs) sits in the framework's bundle, next to its binary.
++    Dl_info info;
++    if (dladdr(reinterpret_cast<const void*>(&Context::GetAppBundlePath), &info) != 0 && info.dli_fname != nullptr) {
++        std::string binaryPath(info.dli_fname);
++        return binaryPath.substr(0, binaryPath.find_last_of('/'));
++    }
+ #endif
+ 
+ #ifdef NON_PORTABLE
+@@ -545,6 +553,11 @@ std::string Context::GetAppDirectoryPath(const std::string& appName) {
+ #endif
+ 
+ #ifdef __IOS__
++    // iHarbour: every game gets a folder of its own in the app's Documents, which the launcher passes in
++    // SHIP_HOME.
++    if (const char* fpath = std::getenv("SHIP_HOME")) {
++        return std::string(fpath);
++    }
+     const char* home = getenv("HOME");
+     return std::string(home) + "/Documents";
+ #endif
+diff --git a/src/ship/audio/Audio.cpp b/src/ship/audio/Audio.cpp
+index 8cc5b12e..55828654 100644
+--- a/src/ship/audio/Audio.cpp
++++ b/src/ship/audio/Audio.cpp
+@@ -1,6 +1,6 @@
+ #include "ship/audio/Audio.h"
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+ #include "ship/audio/CoreAudioAudioPlayer.h"
+ #endif
+ 
+@@ -21,7 +21,7 @@ void Audio::InitAudioPlayer() {
+             mAudioPlayer = std::make_shared<WasapiAudioPlayer>(this->mAudioSettings);
+             break;
+ #endif
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+         case AudioBackend::COREAUDIO:
+             mAudioPlayer = std::make_shared<CoreAudioAudioPlayer>(this->mAudioSettings);
+             break;
+@@ -48,7 +48,7 @@ void Audio::Init() {
+ #ifdef _WIN32
+     mAvailableAudioBackends->push_back(AudioBackend::WASAPI);
+ #endif
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+     mAvailableAudioBackends->push_back(AudioBackend::COREAUDIO);
+ #endif
+     mAvailableAudioBackends->push_back(AudioBackend::SDL);
+@@ -97,7 +97,7 @@ AudioBackend Audio::GetSavedAudioBackend() {
+     return AudioBackend::WASAPI;
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+     return AudioBackend::COREAUDIO;
+ #endif
+ 

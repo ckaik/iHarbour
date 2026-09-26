@@ -1,0 +1,172 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e9f317141..d2c3738e3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,16 +26,26 @@ if(IOS)
+         set(PLATFORM "OS64")
+     endif()
+     option(IOS_SIGNING "Code sign the iOS app (OFF produces an unsigned bundle for sideloading)" ON)
+-    include(cmake/ios.toolchain.cmake)
+-    # cmake/ios.paperboat.toolchain.cmake sets this before the toolchain bakes
+-    # it into the target triple. Anything lower dies deep in <format> instead.
+-    if(DEPLOYMENT_TARGET VERSION_LESS 16.3)
+-        message(FATAL_ERROR
+-            "iOS deployment target is ${DEPLOYMENT_TARGET}; Paperboat needs 16.3 or newer "
+-            "(std::format's floating-point path calls std::to_chars, which libc++ marks "
+-            "unavailable before then).\n"
+-            "Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/ios.paperboat.toolchain.cmake, "
+-            "or pass -DDEPLOYMENT_TARGET=16.3 yourself.")
++    if(HARBOUR_ROOT)
++        # iHarbour builds with CMake's own iOS support and Ninja. leetal's toolchain
++        # would overwrite its sysroot, architectures and flags, so it stays out;
++        # the deployment target comes from CMAKE_OSX_DEPLOYMENT_TARGET instead.
++        if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 16.3)
++            message(FATAL_ERROR
++                "iOS deployment target is ${CMAKE_OSX_DEPLOYMENT_TARGET}; Paperboat needs 16.3 or newer.")
++        endif()
++    else()
++        include(cmake/ios.toolchain.cmake)
++        # cmake/ios.paperboat.toolchain.cmake sets this before the toolchain bakes
++        # it into the target triple. Anything lower dies deep in <format> instead.
++        if(DEPLOYMENT_TARGET VERSION_LESS 16.3)
++            message(FATAL_ERROR
++                "iOS deployment target is ${DEPLOYMENT_TARGET}; Paperboat needs 16.3 or newer "
++                "(std::format's floating-point path calls std::to_chars, which libc++ marks "
++                "unavailable before then).\n"
++                "Configure with -DCMAKE_TOOLCHAIN_FILE=cmake/ios.paperboat.toolchain.cmake, "
++                "or pass -DDEPLOYMENT_TARGET=16.3 yourself.")
++        endif()
+     endif()
+     add_compile_definitions(
+         PLATFORM_IOS=1
+@@ -217,6 +227,12 @@ if(ANDROID OR IOS OR EMSCRIPTEN)
+     set(DISABLE_DLL_LOADER ON CACHE BOOL "" FORCE)
+ endif()
+ 
++# iHarbour (iOS): dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the launcher app.
++if(HARBOUR_ROOT)
++    include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ # Add libultraship BEFORE setting include directories to avoid polluting its builds.
+ # Into the binary tree, not the submodule: Android configures once per ABI, and
+ # an in-source build dir has them all overwriting the same libImGui.a.
+@@ -297,7 +313,15 @@ file(GLOB_RECURSE PORT_SOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+ 
+ list(FILTER PORT_SOURCES EXCLUDE REGEX ".*.inc.c")
+ 
+-if(IOS)
++if(HARBOUR_ROOT)
++    # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++    # that the iHarbour launcher app loads and runs in its own process.
++    add_library(${PROJECT_NAME} SHARED
++        ${GAME_SOURCES}
++        ${PORT_SOURCES}
++    )
++    harbour_add_game_framework(${PROJECT_NAME})
++elseif(IOS)
+     set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ios)
+     set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
+     set(IMAGE_FILES ${IOS_DIR}/PoweredBy.png)
+@@ -538,7 +562,10 @@ endif()
+ # Torch reads config.yml and the asset yamls off disk to extract a ROM. Android
+ # unpacks its own out of the APK and the web build preloads them at link time;
+ # iOS needs them inside the .app, where GetAppBundlePath() points.
+-if(IOS)
++if(HARBOUR_ROOT)
++    # iHarbour: scripts/build-engine.sh puts them into the framework (see
++    # ports/paperboat/port.sh in iHarbour).
++elseif(IOS)
+     add_custom_command(
+         TARGET ${PROJECT_NAME} POST_BUILD
+         COMMENT "Bundling config.yml and asset yamls..."
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index 370fa6f90..de6efbccb 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -193,9 +193,15 @@ GameEngine::GameEngine() {
+     AllocConsole();
+ #endif
+ 
++#ifdef HARBOUR_IOS
++    // libultraship already puts the config file in the app directory. Prefixed here as well, an absolute app
++    // directory (iHarbour's SHIP_HOME) appears twice in the path, and settings never load or save.
++    this->context = Ship::Context::CreateUninitializedInstance("Paperboat", "boat", "paperboat.cfg.json");
++#else
+     this->context = Ship::Context::CreateUninitializedInstance(
+         "Paperboat", "boat", Ship::Context::GetPathRelativeToAppDirectory("paperboat.cfg.json")
+     );
++#endif
+     gShipContext = this->context;
+ 
+     this->context->InitLogging();
+@@ -333,6 +339,11 @@ ImFont* GameEngine::CreateFontWithSize(float size, std::string fontPath) {
+         auto initData = std::make_shared<Ship::ResourceInitData>();
+         ImFontConfig config;
+         config.FontDataOwnedByAtlas = false;
++#ifdef __IOS__
++        // The menus run in points on a Retina framebuffer on iOS, so rasterize the glyphs at its density, as
++        // libultraship does for its default font. Otherwise the text is scaled up and blurry.
++        config.RasterizerDensity = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetDpiScale();
++#endif
+ 
+         initData->Format = RESOURCE_FORMAT_BINARY;
+         initData->Type = static_cast<uint32_t>(RESOURCE_TYPE_FONT);
+@@ -351,6 +362,9 @@ ImFont* GameEngine::CreateFontWithSize(float size, std::string fontPath) {
+     iconsConfig.MergeMode = true;
+     iconsConfig.PixelSnapH = true;
+     iconsConfig.GlyphMinAdvanceX = iconFontSize;
++#ifdef __IOS__
++    iconsConfig.RasterizerDensity = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetDpiScale();
++#endif
+     mImGuiIo->Fonts->AddFontFromMemoryCompressedBase85TTF(
+         fontawesome_compressed_data_base85, iconFontSize, &iconsConfig, sIconsRanges
+     );
+@@ -846,7 +860,8 @@ void GameEngine::Create(int argc, char* argv[]) {
+ bool GameEngine::sRelaunchRequested = false;
+ 
+ bool GameEngine::CanRelaunch() {
+-#if defined(_WIN32) || ((defined(__linux__) || defined(__APPLE__)) && !defined(__ANDROID__))
++    // iOS apps can't exec themselves (and in iHarbour the launcher shares the process).
++#if defined(_WIN32) || ((defined(__linux__) || defined(__APPLE__)) && !defined(__ANDROID__) && !defined(__IOS__))
+     return true;
+ #else
+     return false;
+@@ -870,7 +885,7 @@ void GameEngine::RelaunchIfRequested(int argc, char* argv[]) {
+             SPDLOG_ERROR("Relaunch failed: CreateProcess error {}", GetLastError());
+         }
+     }
+-#elif (defined(__linux__) || defined(__APPLE__)) && !defined(__ANDROID__)
++#elif (defined(__linux__) || defined(__APPLE__)) && !defined(__ANDROID__) && !defined(__IOS__)
+     execv(argv[0], argv);
+     SPDLOG_ERROR("Relaunch failed: execv error {}", strerror(errno));
+ #endif
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 074856950..b008217c8 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -31,6 +31,9 @@ extern "C" void Graphics_PushFrame(Gfx* displayList) {
+ 
+ #ifdef _WIN32
+ int SDL_main(int argc, char** argv) {
++#elif defined(HARBOUR_IOS)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++extern "C" int HarbourGame_Main(int argc, char* argv[]) {
+ #else
+ #if defined(__cplusplus) && defined(PLATFORM_IOS)
+ extern "C"
+diff --git a/src/port/ui/TouchControls.cpp b/src/port/ui/TouchControls.cpp
+index bb0ab8784..0fb599f7c 100644
+--- a/src/port/ui/TouchControls.cpp
++++ b/src/port/ui/TouchControls.cpp
+@@ -16,7 +16,8 @@
+ #include <cstdio>
+ #include <vector>
+ 
+-#if defined(PLATFORM_IOS) || defined(__IOS__) || defined(__ANDROID__)
++// iHarbour draws its own controller over the game, so the engine's stays off unless turned on in the menu.
++#if (defined(PLATFORM_IOS) || defined(__IOS__) || defined(__ANDROID__)) && !defined(HARBOUR_IOS)
+ #define TOUCH_CONTROLS_DEFAULT 1
+ #else
+ #define TOUCH_CONTROLS_DEFAULT 0

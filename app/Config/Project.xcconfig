@@ -1,0 +1,20 @@
+// Build settings for every target and configuration of iHarbour.xcodeproj.
+//
+// Per-developer settings (signing, bundle identifier, which games to build) go in Local.xcconfig
+// next to this file, which git ignores. Local.xcconfig.example shows what it takes. The project
+// itself sets no signing settings, since they would override the ones here.
+
+// Automatic signing without a team is enough for the simulator. A device needs your team in
+// Local.xcconfig.
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+
+// A bundle identifier can belong to one team only, so pick your own in Local.xcconfig to sign
+// for a device.
+HARBOUR_BUNDLE_IDENTIFIER = org.iharbour.launcher
+
+// The games to build and include, as ids of folders in ports/, separated by spaces. Empty means
+// all of them: soh 2ship ghostship spaghettikart starship lighthouse paperboat.
+HARBOUR_GAMES =
+
+#include? "Local.xcconfig"

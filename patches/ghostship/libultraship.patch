@@ -1,0 +1,208 @@
+diff --git a/include/fast/backends/gfx_sdl.h b/include/fast/backends/gfx_sdl.h
+index f06293b1..590b7123 100644
+--- a/include/fast/backends/gfx_sdl.h
++++ b/include/fast/backends/gfx_sdl.h
+@@ -79,6 +79,12 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
+     // OTRTODO: These are redundant. Info can be queried from SDL.
+     int mWindowWidth = 640;
+     int mWindowHeight = 480;
++#ifdef __IOS__
++    // iOS can't present from the background: CAMetalLayer's nextDrawable blocks and then returns nil, and the
++    // system kills apps that submit GPU work there. Frames are skipped between resigning active and becoming
++    // active again.
++    bool mInBackground = false;
++#endif
+     void (*mOnAllKeysUp)();
+ 
+     std::shared_ptr<Ship::ConsoleVariable> mConsoleVariable;
+diff --git a/include/ship/audio/AudioPlayer.h b/include/ship/audio/AudioPlayer.h
+index 2725ec3c..f054f8df 100644
+--- a/include/ship/audio/AudioPlayer.h
++++ b/include/ship/audio/AudioPlayer.h
+@@ -158,7 +158,7 @@ class AudioPlayer {
+ #include "WasapiAudioPlayer.h"
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+ #include "CoreAudioAudioPlayer.h"
+ #endif
+ 
+diff --git a/include/ship/audio/CoreAudioAudioPlayer.h b/include/ship/audio/CoreAudioAudioPlayer.h
+index edbe9a80..d5011891 100644
+--- a/include/ship/audio/CoreAudioAudioPlayer.h
++++ b/include/ship/audio/CoreAudioAudioPlayer.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+-#ifdef __APPLE__
++// iOS has no HAL output unit (kAudioUnitSubType_HALOutput); SDL audio plays there instead.
++#if defined(__APPLE__) && !defined(__IOS__)
+ 
+ #include "AudioPlayer.h"
+ #include <AudioToolbox/AudioToolbox.h>
+diff --git a/src/fast/Fast3dGui.cpp b/src/fast/Fast3dGui.cpp
+index 35bc9cf1..7c149c36 100644
+--- a/src/fast/Fast3dGui.cpp
++++ b/src/fast/Fast3dGui.cpp
+@@ -66,9 +66,21 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
+ }
+ 
+ float Fast3dGui::ComputeDpiScale() {
+-#if (!defined(__APPLE__) || defined(__IOS__)) && !defined(__EMSCRIPTEN__)
+-    // Only macOS and browsers separate logical points from physical pixels here; every
+-    // other platform (iOS included, which runs ImGui in pixel space) keeps a scale of 1.
++#ifdef __IOS__
++    // iHarbour: ImGui runs in pixels on iOS, but the scale is still the screen's pixels per point, so fonts are
++    // rasterized for it and the game can size its menus in points.
++    if (mImpl.Metal.Window != nullptr && mImpl.Metal.Renderer != nullptr) {
++        int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
++        SDL_GetWindowSize(static_cast<SDL_Window*>(mImpl.Metal.Window), &logicalW, &logicalH);
++        SDL_GetRendererOutputSize(mImpl.Metal.Renderer, &pixelW, &pixelH);
++        if (logicalW > 0 && pixelW > 0) {
++            return std::clamp(static_cast<float>(pixelW) / static_cast<float>(logicalW), 1.0f, 4.0f);
++        }
++    }
++    return 1.0f;
++#elif !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
++    // Only macOS and browsers (and iOS, above) separate logical points from physical pixels here;
++    // every other platform keeps a scale of 1.
+     return 1.0f;
+ #else
+     // Opengl.Window and Metal.Window alias the same union slot (both are the SDL_Window*).
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index ba8b585b..3b48422a 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -235,6 +235,17 @@ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
+         return;
+     }
+ 
++#ifdef __IOS__
++    // The window always fills its scene on iOS. SDL's fullscreen mode would resize it to the display mode instead,
++    // which SDL doesn't keep in step with the scene's orientation, leaving the game drawing a portrait frame into a
++    // landscape view.
++    mFullScreen = on;
++    if (call_callback && mOnFullscreenChanged != nullptr) {
++        mOnFullscreenChanged(on);
++    }
++    return;
++#endif
++
+     int display_in_use = SDL_GetWindowDisplayIndex(mWnd);
+     if (display_in_use < 0) {
+         SPDLOG_WARN("Can't detect on which monitor we are. Probably out of display area?");
+@@ -757,6 +768,14 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
+         case SDL_DROPFILE:
+             mFileDrop->SetDroppedFile(event.drop.file);
+             break;
++#ifdef __IOS__
++        case SDL_APP_WILLENTERBACKGROUND:
++            mInBackground = true;
++            break;
++        case SDL_APP_DIDENTERFOREGROUND:
++            mInBackground = false;
++            break;
++#endif
+         case SDL_QUIT:
+             Close();
+             break;
+@@ -764,14 +783,26 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
+ }
+ 
+ void GfxWindowBackendSDL2::HandleEvents() {
+-    SDL_Event event;
+-    SDL_PumpEvents();
+-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
+-        HandleSingleEvent(event);
+-    }
+-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
+-        HandleSingleEvent(event);
++    auto handlePendingEvents = [this]() {
++        SDL_Event event;
++        SDL_PumpEvents();
++        while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
++            HandleSingleEvent(event);
++        }
++        while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
++            HandleSingleEvent(event);
++        }
++    };
++    handlePendingEvents();
++
++#ifdef __IOS__
++    // No frames are drawn while the app is inactive, and the frame pacing lives in the drawing path, so the game
++    // would run flat out behind Control Center or an incoming call. Pause it until the app is active again.
++    while (mInBackground && mIsRunning) {
++        SDL_Delay(16);
++        handlePendingEvents();
+     }
++#endif
+ 
+     // resync fullscreen state
+ #if defined(__APPLE__) && !defined(__IOS__)
+@@ -798,7 +829,11 @@ void GfxWindowBackendSDL2::HandleEvents() {
+ }
+ 
+ bool GfxWindowBackendSDL2::IsFrameReady() {
++#ifdef __IOS__
++    return !mInBackground;
++#else
+     return true;
++#endif
+ }
+ 
+ bool GfxWindowBackendSDL2::IsWindowVisible() {
+diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
+index 2ee0d7d9..d13b7d1d 100644
+--- a/src/ship/Context.cpp
++++ b/src/ship/Context.cpp
+@@ -44,6 +44,9 @@
+ #include "ship/utils/AppleFolderManager.h"
+ #include <unistd.h>
+ #include <pwd.h>
++#ifdef __IOS__
++#include <dlfcn.h>
++#endif
+ #endif
+ 
+ namespace Ship {
+@@ -440,6 +443,16 @@ std::string Context::GetAppBundlePath() {
+ #endif
+ 
+ #ifdef __IOS__
++    // iHarbour: the game is a framework that the launcher app loads, and its read-only data (the port's own
++    // archive, extraction specs) sits in the framework's bundle, next to its binary.
++    {
++        Dl_info info;
++        if (dladdr(reinterpret_cast<const void*>(&Context::GetAppBundlePath), &info) != 0 &&
++            info.dli_fname != nullptr) {
++            std::string binaryPath(info.dli_fname);
++            return binaryPath.substr(0, binaryPath.find_last_of('/'));
++        }
++    }
+     // App bundle resources; user files live in Documents (GetAppDirectoryPath).
+     {
+         FolderManager iosBundleFolderManager;
+@@ -510,6 +523,11 @@ std::string Context::GetAppDirectoryPath(const std::string& appName) {
+ #endif
+ 
+ #ifdef __IOS__
++    // iHarbour: every game gets a folder of its own in the app's Documents, which the launcher passes in
++    // SHIP_HOME.
++    if (const char* fpath = std::getenv("SHIP_HOME")) {
++        return std::string(fpath);
++    }
+     const char* home = getenv("HOME");
+     return std::string(home) + "/Documents";
+ #endif
+diff --git a/src/ship/audio/CoreAudioAudioPlayer.cpp b/src/ship/audio/CoreAudioAudioPlayer.cpp
+index 489273b6..dfc535ee 100644
+--- a/src/ship/audio/CoreAudioAudioPlayer.cpp
++++ b/src/ship/audio/CoreAudioAudioPlayer.cpp
+@@ -1,4 +1,4 @@
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(__IOS__)
+ #include "ship/audio/CoreAudioAudioPlayer.h"
+ #include <spdlog/spdlog.h>
+ #include <cstring>

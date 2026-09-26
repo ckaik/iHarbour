@@ -1,0 +1,16 @@
+// Copy to Local.xcconfig (git ignores it) and fill in your own values.
+
+// Your team ID, from developer.apple.com/account. Don't pick the team in Xcode's Signing &
+// Capabilities tab: that writes it into the checked-in project, where it overrides this file.
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Any reverse-DNS identifier you own.
+HARBOUR_BUNDLE_IDENTIFIER = com.example.iharbour
+
+// Optional: manual signing, for example for a distribution build.
+// CODE_SIGN_STYLE = Manual
+// CODE_SIGN_IDENTITY = Apple Distribution
+// PROVISIONING_PROFILE_SPECIFIER = iHarbour App Store
+
+// Optional: build only some games, which saves build time and disk space.
+// HARBOUR_GAMES = soh starship

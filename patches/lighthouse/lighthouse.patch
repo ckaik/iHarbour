@@ -1,0 +1,118 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 81cdd057..7bfedeeb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,6 +13,12 @@ if(APPLE)
+   enable_language(OBJCXX)
+ endif()
+ 
++# iHarbour (iOS): the dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the iHarbour launcher app.
++if(HARBOUR_ROOT)
++    include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ set(EXCLUDE_MPQ_SUPPORT ON)
+ 
+ set(NATO_PHONETIC_ALPHABET
+@@ -118,7 +124,12 @@ else()
+     set(CPP "${CMAKE_C_COMPILER}" "-E" "-P" "-Wno-trigraphs" "-x" "c")
+ endif()
+ 
+-if(IOS)
++# iHarbour builds with CMake's own iOS support; the toolchain would override it.
++if(IOS AND HARBOUR_ROOT)
++    add_compile_definitions(
++        PLATFORM_IOS=1
++    )
++elseif(IOS)
+     set(PLATFORM "OS64")
+     include(cmake/ios.toolchain.cmake)
+     add_compile_definitions(
+@@ -234,7 +245,12 @@ foreach(source IN LISTS ALL_FILES)
+     source_group("${source_path_adjusted}" FILES "${source}")
+ endforeach()
+ 
+-if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++if (HARBOUR_ROOT)
++    # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++    # that the iHarbour launcher app loads and runs in its own process.
++    add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
++    harbour_add_game_framework(${PROJECT_NAME})
++elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/ios)
+ 
+     set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
+@@ -438,6 +454,15 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU|Clang|AppleClang")
+ 	)
+ endif()
+ 
++if (HARBOUR_ROOT)
++    # libultraship defines __IOS__ only for itself, and its public headers have
++    # iOS-only members. iOS has no native file dialog: use the ImGui file browser.
++    target_compile_definitions(${PROJECT_NAME} PRIVATE
++        __IOS__
++        LIGHTHOUSE_NATIVE_FILE_DIALOG=0
++    )
++endif()
++
+ if(USE_NETWORKING)
+     if(MSVC)
+         vcpkg_install_packages(sdl2-net)
+@@ -476,6 +501,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+     set(ADDITIONAL_LIBRARY_DEPENDENCIES
+         "$<$<CONFIG:Debug>:-Wl,--wrap=abort>"
+     )
++elseif(HARBOUR_ROOT)
++    # SDL, SDL2_net and the codecs come in through harbour_add_game_framework.
++    set(ADDITIONAL_LIBRARY_DEPENDENCIES "")
+     target_include_directories(${PROJECT_NAME} PRIVATE
+         ${DEVKITPRO}/portlibs/wiiu/include/
+     )
+@@ -738,7 +766,9 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+   endif()
+ endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++# On iOS iHarbour's ports/lighthouse/port.sh packs lighthouse.o2r and puts it
++# into the framework with config.yml and the assets.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT HARBOUR_ROOT)
+ include(ExternalProject)
+ ExternalProject_Add(TorchExternal
+ 	PREFIX TorchExternal
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index 7d6b3012..2c273403 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -485,6 +485,9 @@ void GameEngine::RelaunchIfRequested(int argc, char* argv[]) {
+             SPDLOG_ERROR("Relaunch failed: CreateProcess error {}", GetLastError());
+         }
+     }
++#elif defined(HARBOUR_IOS)
++    // iHarbour: the game runs inside the launcher app, which can't start it a second time in one process. Closing
++    // the window returns to the launcher; the mod changes apply the next time iHarbour starts.
+ #elif defined(__linux__) || defined(__APPLE__)
+     execv(argv[0], argv);
+     SPDLOG_ERROR("Relaunch failed: execv error {}", strerror(errno));
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index b870b20a..37a862bc 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -272,12 +272,17 @@ void push_frame() {
+     }
+ }
+ 
++#if defined(HARBOUR_IOS)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++extern "C" int HarbourGame_Main(int argc, char* argv[]) {
++#else
+ /* Rename SDL_main to main for SDL compatibility */
+ #ifdef __GNUC__
+ #define SDL_main main
+ #endif
+ 
+ int SDL_main(int argc, char* argv[]) {
++#endif
+ #ifdef _WIN32
+     timeBeginPeriod(1);
+ #endif

@@ -1,0 +1,35 @@
+[submodule "games/Shipwright"]
+	path = games/Shipwright
+	url = https://github.com/HarbourMasters/Shipwright.git
+	branch = develop
+	ignore = dirty
+[submodule "games/2ship2harkinian"]
+	path = games/2ship2harkinian
+	url = https://github.com/2ship2harkinian/2ship2harkinian.git
+	branch = develop
+	ignore = dirty
+[submodule "games/Ghostship"]
+	path = games/Ghostship
+	url = https://github.com/HarbourMasters/Ghostship.git
+	branch = develop
+	ignore = dirty
+[submodule "games/SpaghettiKart"]
+	path = games/SpaghettiKart
+	url = https://github.com/HarbourMasters/SpaghettiKart.git
+	branch = main
+	ignore = dirty
+[submodule "games/Starship"]
+	path = games/Starship
+	url = https://github.com/HarbourMasters/Starship.git
+	branch = main
+	ignore = dirty
+[submodule "games/Lighthouse"]
+	path = games/Lighthouse
+	url = https://github.com/IsleOPorts/Lighthouse.git
+	branch = develop
+	ignore = dirty
+[submodule "games/PaperBoat"]
+	path = games/PaperBoat
+	url = https://github.com/HarbourMasters/PaperBoat.git
+	branch = develop
+	ignore = dirty

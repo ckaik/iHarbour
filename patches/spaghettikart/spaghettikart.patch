@@ -1,0 +1,157 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9eac9a299..0ce8d70e7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -28,13 +28,23 @@ if(ENABLE_VCPKG)
+   include(cmake/dependencies/vcpkg.cmake)
+ endif()
+ 
++# iHarbour (iOS): dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the launcher app
++if(HARBOUR_ROOT)
++  include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ set(SPAGHETTIKART_IOS OFF)
+ if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+   set(SPAGHETTIKART_IOS ON)
+-  set(PLATFORM "OS64")
+-  include(cmake/ios.toolchain.cmake)
+-  set(CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "YOUR_TEAM_ID")
+-  set(PROJECT_ID "dev.net64.game")
++  # iHarbour builds with CMake's own iOS support, which the toolchain would
++  # override (sysroot, architectures, flags, hidden symbols).
++  if(NOT HARBOUR_ROOT)
++    set(PLATFORM "OS64")
++    include(cmake/ios.toolchain.cmake)
++    set(CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "YOUR_TEAM_ID")
++    set(PROJECT_ID "dev.net64.game")
++  endif()
+ endif()
+ 
+ # Toggle for GLES (Required for many ARM/Mobile platforms)
+@@ -115,7 +125,7 @@ list(APPEND ALL_FILES ${ALL_FILES_ROOT})
+ list(FILTER ALL_FILES EXCLUDE REGEX ".*.inc.c")
+ list(FILTER ALL_FILES EXCLUDE REGEX "./src/debug/crash_screen_enhancement.c")
+ 
+-if(SPAGHETTIKART_IOS)
++if(SPAGHETTIKART_IOS AND NOT HARBOUR_ROOT)
+   set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/ios)
+ 
+   set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
+@@ -126,7 +136,19 @@ if(SPAGHETTIKART_IOS)
+ 
+ endif()
+ 
+-add_executable(${PROJECT_NAME} ${ALL_FILES})
++if(HARBOUR_ROOT)
++  # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++  # that the iHarbour launcher app loads and runs in its own process.
++  add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
++  harbour_add_game_framework(${PROJECT_NAME})
++  # __IOS__: libultraship's public headers have iOS-only members. No device I/O
++  # in miniaudio: the engine runs without a device (HMAS.cpp), and its Core Audio
++  # backend on iOS is Objective-C. It changes miniaudio's structs, so it's set
++  # for every file that includes miniaudio.h.
++  target_compile_definitions(${PROJECT_NAME} PRIVATE __IOS__ MA_NO_DEVICE_IO)
++else()
++  add_executable(${PROJECT_NAME} ${ALL_FILES})
++endif()
+ target_include_directories(
+   ${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                           ${CMAKE_CURRENT_SOURCE_DIR}/include
+@@ -136,6 +158,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE YAML_CPP_STATIC_DEFINE)
+ 
+ if(SPAGHETTIKART_IOS)
+   target_compile_definitions(${PROJECT_NAME} PRIVATE PLATFORM_IOS=1)
++endif()
++if(SPAGHETTIKART_IOS AND NOT HARBOUR_ROOT)
+   set_xcode_property(${PROJECT_NAME} PRODUCT_BUNDLE_IDENTIFIER ${PROJECT_ID}
+                      All)
+   set_target_properties(
+@@ -207,7 +231,8 @@ endif()
+ # On macOS these live in the .app's Contents/Resources instead (see
+ # cmake/macos/apple_bundle.cmake); copying them next to the executable would
+ # just duplicate them inside Contents/MacOS.
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
++# On iOS scripts/build-engine.sh in iHarbour puts them into the framework.
++if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin" AND NOT HARBOUR_ROOT)
+ add_custom_command(
+   TARGET ${PROJECT_NAME}
+   POST_BUILD
+@@ -219,7 +244,10 @@ add_custom_command(
+   VERBATIM)
+ endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++# iHarbour (iOS): no host Torch, extraction or asset packing in the iOS build.
++# The game extracts the ROM in-process, and scripts/build-engine.sh packs
++# spaghetti.o2r.
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT HARBOUR_ROOT)
+   include(ExternalProject)
+   # Torch's pinned spdlog bundles an fmt that trips a consteval error under
+   # newer AppleClang (Xcode 16+): "call to consteval function
+diff --git a/cmake/SetFlags.cmake b/cmake/SetFlags.cmake
+index 44bfce2fb..64776cb14 100644
+--- a/cmake/SetFlags.cmake
++++ b/cmake/SetFlags.cmake
+@@ -40,6 +40,12 @@ else()
+     -flto=auto
+     -pipe)
+   target_link_options(${PROJECT_NAME} PRIVATE -flto=auto)
++  # iHarbour (iOS): no LTO. The framework's link would take long and a lot of
++  # memory, next to other games building at the same time.
++  if(HARBOUR_ROOT)
++    target_compile_options(${PROJECT_NAME} PRIVATE -fno-lto)
++    target_link_options(${PROJECT_NAME} PRIVATE -fno-lto)
++  endif()
+ 
+   set(C_FLAGS -Werror-implicit-function-declaration
+               -Wno-incompatible-pointer-types)
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 19a41f631..2c6582af8 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -1022,6 +1022,9 @@ void CM_ThrowRuntimeError(const char* fmt, ...) {
+ 
+ #ifdef _WIN32
+ int SDL_main(int argc, char** argv) {
++#elif defined(HARBOUR_IOS)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++extern "C" int HarbourGame_Main(int argc, char* argv[]) {
+ #else
+ #if defined(__cplusplus) && defined(PLATFORM_IOS)
+ extern "C"
+@@ -1033,7 +1036,7 @@ extern "C"
+     // Allow non-ascii characters for Windows
+     setlocale(LC_ALL, ".UTF8");
+ #endif
+-#if defined(__APPLE__)
++#if defined(__APPLE__) && !defined(__IOS__)
+     // Disable the macOS "press and hold" accent/diacritic popup for this app. SDL keeps a Cocoa text
+     // input context active, so holding a movement key is interpreted as holding a letter key in a text
+     // field, and macOS shows the accent picker instead of repeating it. Per-app equivalent of
+@@ -1088,5 +1091,10 @@ extern "C"
+     // remaining static destructors: their order is unspecified and some log after
+     // spdlog's own statics are gone, crashing on quit (same class as issue #689).
+     // Mirrors the _Exit precedent on the extraction error paths.
++#ifdef HARBOUR_IOS
++    // iHarbour: the launcher lives in the same process, so return to it.
++    return 0;
++#else
+     _Exit(0);
++#endif
+ }
+diff --git a/src/port/SpaghettiGui.cpp b/src/port/SpaghettiGui.cpp
+index 17bfb2ec2..a16cf823b 100644
+--- a/src/port/SpaghettiGui.cpp
++++ b/src/port/SpaghettiGui.cpp
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #if defined(__ANDROID__) || defined(__IOS__)
+-#include "port/mobile/MobileImpl.h"
++#include "ship/port/mobile/MobileImpl.h"
+ #endif
+ 
+ #ifdef ENABLE_OPENGL

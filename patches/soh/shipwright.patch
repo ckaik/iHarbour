@@ -1,0 +1,143 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7792172b2..3e5d98c6e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -192,6 +192,14 @@ set(INCLUDE_MPQ_SUPPORT ON)
+ ################################################################################
+ add_compile_definitions(CONTROLLERBUTTONS_T=uint32_t)
+ 
++################################################################################
++# iHarbour (iOS): dependencies desktop builds take from the system, and the
++# helper that turns the game into a framework for the launcher app
++################################################################################
++if(HARBOUR_ROOT)
++    include(${HARBOUR_ROOT}/cmake/HarbourIOS.cmake)
++endif()
++
+ ################################################################################
+ # Torch (ROM asset extraction)
+ ################################################################################
+diff --git a/soh/CMakeLists.txt b/soh/CMakeLists.txt
+index f356d2148..9dcc889d6 100644
+--- a/soh/CMakeLists.txt
++++ b/soh/CMakeLists.txt
+@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 20 CACHE STRING "The C++ standard to use")
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_C_STANDARD 23 CACHE STRING "The C standard to use")
+ 
+-if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
++if (CMAKE_SYSTEM_NAME MATCHES "Darwin|iOS")
+     enable_language(OBJCXX)
+     set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -fobjc-arc")
+     set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -fobjc-arc")
+@@ -153,7 +153,7 @@ endif()
+ # handle speechsynthesizer removals
+ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     list(FILTER soh__ EXCLUDE REGEX "soh/Enhancements/speechsynthesizer/Darwin")
+-elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
++elseif (CMAKE_SYSTEM_NAME MATCHES "Darwin|iOS")
+     list(FILTER soh__ EXCLUDE REGEX "soh/Enhancements/speechsynthesizer/SAPI")
+ else()
+     list(FILTER soh__ EXCLUDE REGEX "soh/Enhancements/speechsynthesizer/(Darwin|SAPI)")
+@@ -226,7 +226,14 @@ set(ALL_FILES
+ ################################################################################
+ # Target
+ ################################################################################
+-add_executable(${PROJECT_NAME} ${ALL_FILES})
++if (HARBOUR_ROOT)
++    # iHarbour: on iOS the game is not an app of its own. It builds as a framework
++    # that the iHarbour launcher app loads and runs in its own process.
++    add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
++    harbour_add_game_framework(${PROJECT_NAME})
++else()
++    add_executable(${PROJECT_NAME} ${ALL_FILES})
++endif()
+ 
+ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+ use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
+@@ -387,6 +394,24 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+         SPDLOG_ACTIVE_LEVEL=${SPDLOG_MIN_CUTOFF}
+         LOG_LEVEL_GAME_PRINTS=${SPDLOG_LEVEL_OFF}
+     )
++elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    # Same as the Clang block below, minus ENABLE_OPENGL: iOS renders through Metal.
++    target_compile_definitions(${PROJECT_NAME} PRIVATE
++        "$<$<CONFIG:Debug>:"
++            "_DEBUG;"
++        ">"
++        "$<$<CONFIG:Release>:"
++            "NDEBUG;"
++        ">"
++        "F3DEX_GBI_2;"
++        "_CONSOLE;"
++        "_CRT_SECURE_NO_WARNINGS;"
++        "UNICODE;"
++        "_UNICODE;"
++        "__IOS__;"
++        SPDLOG_ACTIVE_LEVEL=${SPDLOG_MIN_CUTOFF}
++        LOG_LEVEL_GAME_PRINTS=${SPDLOG_LEVEL_OFF}
++    )
+ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU|Clang|AppleClang")
+     target_compile_definitions(${PROJECT_NAME} PRIVATE
+         "$<$<CONFIG:Debug>:"
+@@ -482,7 +507,7 @@ if(MSVC)
+ endif()
+ 
+ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+-    if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
++    if (CMAKE_SYSTEM_NAME MATCHES "Darwin|iOS")
+         target_compile_options(${PROJECT_NAME} PRIVATE
+             -Wall -Wextra -Wno-error
+             -Wformat-security
+@@ -605,12 +630,15 @@ if (CMAKE_GENERATOR MATCHES "Visual Studio")
+     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/yml ${CMAKE_BINARY_DIR}/soh/assets
+     )
+ endif()
++# On iOS scripts/build-engine.sh in iHarbour puts the ymls into the framework.
++if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+ add_custom_command(
+     TARGET ${PROJECT_NAME}
+     POST_BUILD
+     COMMENT "Copying asset ymls..."
+     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/yml $<TARGET_FILE_DIR:soh>/assets
+ )
++endif()
+ ################################################################################
+ # Dependencies
+ ################################################################################
+@@ -674,6 +702,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+         -lglad
+         Threads::Threads
+     )
++elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    # SDL, the codecs and the system frameworks come in through harbour_add_game_framework.
++    set(ADDITIONAL_LIBRARY_DEPENDENCIES
++        "libultraship;"
++        "torch;"
++    )
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+     find_package(SDL2 REQUIRED)
+     set(ADDITIONAL_LIBRARY_DEPENDENCIES
+@@ -744,7 +778,7 @@ if(USE_ASAN)
+ endif()
+ 
+ 
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|iOS|NintendoSwitch|CafeOS")
+ INSTALL(TARGETS soh DESTINATION . COMPONENT ship)
+ endif()
+ 
+diff --git a/soh/src/code/main.c b/soh/src/code/main.c
+index 98c632665..391d02860 100644
+--- a/soh/src/code/main.c
++++ b/soh/src/code/main.c
+@@ -55,6 +55,9 @@ int SDL_main(int argc, char* argv[]) {
+     // Allow non-ascii characters for Windows
+     setlocale(LC_ALL, ".UTF8");
+ 
++#elif defined(__IOS__)
++// iHarbour: the launcher app owns main() and starts the game through HarbourEngine.
++int HarbourGame_Main(int argc, char* argv[]) {
+ #else //_WIN32
+ int main(int argc, char* argv[]) {
+ #endif

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pre-push — full repo-wide lint gate before code leaves the machine.
+#
+# pre-commit lints only STAGED files (fast). This catches pre-existing or regressed
+# debt in files you didn't touch this commit — e.g. a file that crossed `file_length`
+# — before it is pushed. Runs the canonical `make lint` (swift-format + SwiftLint
+# --strict over the whole repo).
+#
+# Note: this repo wires core.hooksPath to .githooks, so the global git-lfs pre-push
+# is not chained here. LFS tracks no files in this repo, so that is a no-op.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-push: running full 'make lint' (repo-wide)…"
+make lint
